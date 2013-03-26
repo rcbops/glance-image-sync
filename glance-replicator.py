@@ -6,24 +6,42 @@ from kombu import Connection
 from kombu import Exchange
 from kombu import Queue
 
-API_NODES = ['ubuntu-ha1', 'ubuntu-ha2']
+API_NODES_CONFIG = '/etc/glance/api_nodes.conf'
+GLANCE_API_CONFIG = '/etc/glance/glance-api.conf'
 
-def _read_config():
+def _read_api_nodes_config():
+    config = ConfigParser.RawConfigParser()
+    section = 'DEFAULT'
+
+    if config.read(API_NODES_CONFIG):
+        api_nodes = config.get(section, 'api_nodes').replace(' ', '').split(',')
+
+        return api_nodes
+    else:
+        return None
+
+
+def _read_glance_api_config():
     rabbit_cfg = {}
     section = 'DEFAULT'
     config = ConfigParser.RawConfigParser()
-    config.read('/etc/glance/glance-api.conf')
 
-    rabbit_cfg['host'] = config.get(section, 'rabbit_host')
-    rabbit_cfg['port'] = config.get(section, 'rabbit_port')
-    rabbit_cfg['use_ssl'] = config.get(section, 'rabbit_use_ssl')
-    rabbit_cfg['userid'] = config.get(section, 'rabbit_userid')
-    rabbit_cfg['password'] = config.get(section, 'rabbit_password')
-    rabbit_cfg['virtual_host'] = config.get(section, 'rabbit_virtual_host')
-    rabbit_cfg['exchange'] = config.get(section, 'rabbit_notification_exchange')
-    rabbit_cfg['topic'] = config.get(section, 'rabbit_notification_topic')
+    if config.read(GLANCE_API_CONFIG):
+        if config.get(section, 'notifier_strategy') == 'rabbit':
+            rabbit_cfg['host'] = config.get(section, 'rabbit_host')
+            rabbit_cfg['port'] = config.get(section, 'rabbit_port')
+            rabbit_cfg['use_ssl'] = config.get(section, 'rabbit_use_ssl')
+            rabbit_cfg['userid'] = config.get(section, 'rabbit_userid')
+            rabbit_cfg['password'] = config.get(section, 'rabbit_password')
+            rabbit_cfg['virtual_host'] = config.get(section, 'rabbit_virtual_host')
+            rabbit_cfg['exchange'] = config.get(section, 'rabbit_notification_exchange')
+            rabbit_cfg['topic'] = config.get(section, 'rabbit_notification_topic')
 
-    return rabbit_cfg
+            return rabbit_cfg
+        else:
+            return None
+    else:
+        return None
 
 
 def _connect(rabbit_cfg):
@@ -40,17 +58,13 @@ def _connect(rabbit_cfg):
 
 
 def _declare_queue(rabbit_cfg, routing_key, conn, exchange):
-    queue = Queue(name=routing_key,
-                  routing_key=routing_key,
-                  exchange=exchange,
-                  channel=conn.channel(),
-                  durable=False)
+    queue = Queue(name=routing_key, routing_key=routing_key, exchange=exchange, channel=conn.channel(), durable=False)
     queue.declare()
 
     return queue
 
 
-def duplicate_notifications(rabbit_cfg, conn, exchange):
+def duplicate_notifications(rabbit_cfg, api_nodes, conn, exchange):
     routing_key = '%s.info' % rabbit_cfg['topic']
     notification_queue = _declare_queue(rabbit_cfg, routing_key, conn, exchange)
 
@@ -60,7 +74,7 @@ def duplicate_notifications(rabbit_cfg, conn, exchange):
         if msg == None:
             break
 
-        for node in API_NODES:
+        for node in api_nodes:
             routing_key = '%s.%s.info' % (rabbit_cfg['topic'], node)
             node_queue = _declare_queue(rabbit_cfg, routing_key, conn, exchange)
 
@@ -70,8 +84,6 @@ def duplicate_notifications(rabbit_cfg, conn, exchange):
                 exchange.publish(msg_new, routing_key)
 
         msg.ack()
-
-    conn.close()
 
 
 def sync_images(rabbit_cfg, conn, exchange):
@@ -100,8 +112,6 @@ def sync_images(rabbit_cfg, conn, exchange):
 
         msg.ack()
 
-    conn.close()
-
 
 def main(args):
     if len(args) == 2:
@@ -109,16 +119,26 @@ def main(args):
     else:
         sys.exit(1)
 
-    if cmd in ('duplicate', 'sync'):
-        rabbit_cfg = _read_config()
-        conn, exchange = _connect(rabbit_cfg)
+    if cmd in ('duplicate-notifications', 'sync-images', 'both'):
+        rabbit_cfg = _read_glance_api_config()
+        api_nodes = _read_api_nodes_config()
+
+        if rabbit_cfg and api_nodes:
+            conn, exchange = _connect(rabbit_cfg)
+        else:
+            sys.exit(1)
     else:
         sys.exit(1)
 
-    if cmd == 'duplicate':
-        duplicate_notifications(rabbit_cfg, conn, exchange)
-    elif cmd == 'sync':
+    if cmd == 'duplicate-notifications':
+        duplicate_notifications(rabbit_cfg, api_nodes, conn, exchange)
+    elif cmd == 'sync-images':
         sync_images(rabbit_cfg, conn, exchange)
+    elif cmd == 'both':
+        duplicate_notifications(rabbit_cfg, api_nodes, conn, exchange)
+        sync_images(rabbit_cfg, conn, exchange)
+
+    conn.close()
 
 
 if __name__ == '__main__':
