@@ -70,7 +70,7 @@ def _declare_queue(rabbit_cfg, routing_key, conn, exchange):
     return queue
 
 
-def duplicate_notifications(rabbit_cfg, api_nodes, conn, exchange):
+def _duplicate_notifications(rabbit_cfg, api_nodes, conn, exchange):
     routing_key = '%s.info' % rabbit_cfg['topic']
     notification_queue = _declare_queue(rabbit_cfg, routing_key, conn, exchange)
 
@@ -92,7 +92,7 @@ def duplicate_notifications(rabbit_cfg, api_nodes, conn, exchange):
         msg.ack()
 
 
-def sync_images(rabbit_cfg, conn, exchange):
+def _sync_images(rabbit_cfg, conn, exchange):
     hostname = socket.gethostname()
 
     routing_key = 'glance_replicator.%s.info' % hostname
@@ -137,12 +137,12 @@ def main(args):
         sys.exit(1)
 
     if cmd == 'duplicate-notifications':
-        duplicate_notifications(rabbit_cfg, api_nodes, conn, exchange)
+        _duplicate_notifications(rabbit_cfg, api_nodes, conn, exchange)
     elif cmd == 'sync-images':
-        sync_images(rabbit_cfg, conn, exchange)
+        _sync_images(rabbit_cfg, conn, exchange)
     elif cmd == 'both':
-        duplicate_notifications(rabbit_cfg, api_nodes, conn, exchange)
-        sync_images(rabbit_cfg, conn, exchange)
+        _duplicate_notifications(rabbit_cfg, api_nodes, conn, exchange)
+        _sync_images(rabbit_cfg, conn, exchange)
 
     conn.close()
 
