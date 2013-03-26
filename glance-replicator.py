@@ -58,7 +58,11 @@ def _connect(rabbit_cfg):
 
 
 def _declare_queue(rabbit_cfg, routing_key, conn, exchange):
-    queue = Queue(name=routing_key, routing_key=routing_key, exchange=exchange, channel=conn.channel(), durable=False)
+    queue = Queue(name=routing_key,
+                  routing_key=routing_key,
+                  exchange=exchange,
+                  channel=conn.channel(),
+                  durable=False)
     queue.declare()
 
     return queue
