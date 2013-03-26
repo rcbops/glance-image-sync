@@ -11,14 +11,13 @@ from kombu import Queue
 REPLICATOR_CONFIG = '/etc/glance/replicator.conf'
 GLANCE_API_CONFIG = '/etc/glance/glance-api.conf'
 
+
 def _read_api_nodes_config():
     config = ConfigParser.RawConfigParser()
     section = 'DEFAULT'
 
     if config.read(REPLICATOR_CONFIG):
-        api_nodes = config.get(section, 'api_nodes').replace(' ', '').split(',')
-
-        return api_nodes
+        return config.get(section, 'api_nodes').replace(' ', '').split(',')
     else:
         return None
 
@@ -35,9 +34,12 @@ def _read_glance_api_config():
             rabbit_cfg['use_ssl'] = config.get(section, 'rabbit_use_ssl')
             rabbit_cfg['userid'] = config.get(section, 'rabbit_userid')
             rabbit_cfg['password'] = config.get(section, 'rabbit_password')
-            rabbit_cfg['virtual_host'] = config.get(section, 'rabbit_virtual_host')
-            rabbit_cfg['exchange'] = config.get(section, 'rabbit_notification_exchange')
-            rabbit_cfg['topic'] = config.get(section, 'rabbit_notification_topic')
+            rabbit_cfg['virtual_host'] = config.get(section,
+                                                    'rabbit_virtual_host')
+            rabbit_cfg['exchange'] = config.get(section,
+                                                'rabbit_notification_exchange')
+            rabbit_cfg['topic'] = config.get(section,
+                                             'rabbit_notification_topic')
 
             return rabbit_cfg
         else:
@@ -72,17 +74,23 @@ def _declare_queue(rabbit_cfg, routing_key, conn, exchange):
 
 def _duplicate_notifications(rabbit_cfg, api_nodes, conn, exchange):
     routing_key = '%s.info' % rabbit_cfg['topic']
-    notification_queue = _declare_queue(rabbit_cfg, routing_key, conn, exchange)
+    notification_queue = _declare_queue(rabbit_cfg,
+                                        routing_key,
+                                        conn,
+                                        exchange)
 
     while True:
         msg = notification_queue.get()
 
-        if msg == None:
+        if msg is None:
             break
 
         for node in api_nodes:
             routing_key = 'glance_replicator.%s.info' % node
-            node_queue = _declare_queue(rabbit_cfg, routing_key, conn, exchange)
+            node_queue = _declare_queue(rabbit_cfg,
+                                        routing_key,
+                                        conn,
+                                        exchange)
 
             if msg.payload['publisher_id'] != node:
                 msg_new = exchange.Message(msg.body,
@@ -101,12 +109,12 @@ def _sync_images(rabbit_cfg, conn, exchange):
     while True:
         msg = queue.get()
 
-        if msg == None:
+        if msg is None:
             break
 
         if (msg.payload['payload']['location'] is not None and
             'file://' in msg.payload['payload']['location']):
-            file = msg.payload['payload']['location'].replace('file://','')
+            file = msg.payload['payload']['location'].replace('file://', '')
             if msg.payload['event_type'] == 'image.update':
                 print 'Update detected on %s ...' % (file)
                 os.system("rsync -a -e 'ssh -o StrictHostKeyChecking=no' "
