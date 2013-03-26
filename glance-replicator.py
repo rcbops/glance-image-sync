@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 import os
 import socket
 import sys
@@ -6,14 +8,14 @@ from kombu import Connection
 from kombu import Exchange
 from kombu import Queue
 
-API_NODES_CONFIG = '/etc/glance/api_nodes.conf'
+REPLICATOR_CONFIG = '/etc/glance/replicator.conf'
 GLANCE_API_CONFIG = '/etc/glance/glance-api.conf'
 
 def _read_api_nodes_config():
     config = ConfigParser.RawConfigParser()
     section = 'DEFAULT'
 
-    if config.read(API_NODES_CONFIG):
+    if config.read(REPLICATOR_CONFIG):
         api_nodes = config.get(section, 'api_nodes').replace(' ', '').split(',')
 
         return api_nodes
@@ -79,7 +81,7 @@ def duplicate_notifications(rabbit_cfg, api_nodes, conn, exchange):
             break
 
         for node in api_nodes:
-            routing_key = '%s.%s.info' % (rabbit_cfg['topic'], node)
+            routing_key = 'glance_replicator.%s.info' % node
             node_queue = _declare_queue(rabbit_cfg, routing_key, conn, exchange)
 
             if msg.payload['publisher_id'] != node:
@@ -93,7 +95,7 @@ def duplicate_notifications(rabbit_cfg, api_nodes, conn, exchange):
 def sync_images(rabbit_cfg, conn, exchange):
     hostname = socket.gethostname()
 
-    routing_key = '%s.%s.info' % (rabbit_cfg['topic'], hostname)
+    routing_key = 'glance_replicator.%s.info' % hostname
     queue = _declare_queue(rabbit_cfg, routing_key, conn, exchange)
 
     while True:
