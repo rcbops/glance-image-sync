@@ -79,11 +79,12 @@ def _declare_queue(glance_cfg, routing_key, conn, exchange):
     return queue
 
 
-def _cleanup_node_name(node):
-    # If node name is an FQDN, replace dots w/ underscores since rabbitmq topic
-    # exchange uses dots in routing key to mean something else.
+def _shorten_hostname(node):
+    # If hostname is an FQDN, split it up and return the short name. Some
+    # systems may return FQDN on socket.gethostname(), so we choose one
+    # and run w/ that.
     if '.' in node:
-        return node.replace('.', '_')
+        return node.split('.')[0]
     else:
         return node 
 
@@ -102,7 +103,7 @@ def _duplicate_notifications(glance_cfg, api_nodes, conn, exchange):
             break
 
         for node in api_nodes:
-            routing_key = 'glance_image_sync.%s.info' % _cleanup_node_name(node)
+            routing_key = 'glance_image_sync.%s.info' % _shorten_hostname(node)
             node_queue = _declare_queue(glance_cfg,
                                         routing_key,
                                         conn,
@@ -118,7 +119,7 @@ def _duplicate_notifications(glance_cfg, api_nodes, conn, exchange):
 def _sync_images(glance_cfg, conn, exchange):
     hostname = socket.gethostname()
 
-    routing_key = 'glance_image_sync.%s.info' % _cleanup_node_name(hostname)
+    routing_key = 'glance_image_sync.%s.info' % _shorten_hostname(hostname)
     queue = _declare_queue(glance_cfg, routing_key, conn, exchange)
 
     while True:
