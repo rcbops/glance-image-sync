@@ -14,13 +14,13 @@ Your /etc/glance/glance-image-sync.conf should look like:
 
 API nodes can be specified in /etc/glance/glance-image-sync.conf using a short name or FQDN; both will work as we check for FQDN and then shorten it. However, the glance kombu notifier uses _socket.gethostname()_ for _publisher_id_, so you will need to ensure that nodes can be accessed by name using short name and FQDN since socket.gethostname() may return short name or FQDN depending on how the system was configured.
 
-glance-image-sync accepts one of three arguments:
+When running glance-image-sync, you will need to pass the tool one of the following three arguments:
 
 * duplicate-notifications
 * sync-images
 * both
 
-_duplicate-notifications_ only connects to the _rabbit_notification_topic_ queue and duplicates messages into queues for each glance-api node defined in /etc/glance/glance-image-sync.conf. _sync_images_ only connects to the node's individual queue and then downloads or deletes images depending on event_type.  _both_ is simply a wrapper to both _duplicate-notifications_ and _sync-images_.  Typically, you would cron the job on each glance-api node as follows:
+_duplicate-notifications_ only connects to the _rabbit_notification_topic_ queue and duplicates messages into queues for each glance-api node defined in /etc/glance/glance-image-sync.conf. _sync-images_ only connects to the node's individual queue and then downloads or deletes images depending on event_type.  _both_ is simply a wrapper to both _duplicate-notifications_ and _sync-images_.  Typically, you would cron the job on each glance-api node as follows:
 
     */5 * * * * /path/to/glance-image-sync.py both
 
