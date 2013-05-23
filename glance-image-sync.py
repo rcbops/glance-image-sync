@@ -122,6 +122,10 @@ def _duplicate_notifications(glance_api_cfg, image_sync_cfg, conn, exchange):
         if msg is None:
             break
 
+        # Skip over non-glance notifications.
+        if not msg.payload['event_type'].startswith('image.'):
+            continue
+
         for node in image_sync_cfg['api_nodes']:
             routing_key = 'glance_image_sync.%s.info' % _shorten_hostname(node)
             node_queue = _declare_queue(glance_api_cfg,
