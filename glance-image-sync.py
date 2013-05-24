@@ -16,6 +16,7 @@
 #
 
 import glob
+import logging
 import os
 import socket
 import sys
@@ -31,11 +32,14 @@ GLANCE_API_CONFIG = '/etc/glance/glance-api.conf'
 def _read_api_nodes_config():
     image_sync_cfg = {}
     section = 'DEFAULT'
-    config = ConfigParser.RawConfigParser({'rsync_user': 'glance'})
+    default_log = '/var/log/glance/glance-image-sync.log'
+    config = ConfigParser.RawConfigParser({'rsync_user': 'glance',
+                                           'log_file': default_log})
 
     if config.read(IMAGE_SYNC_CONFIG):
         tmp_api_nodes = config.get(section, 'api_nodes')
         image_sync_cfg['rsync_user'] = config.get(section, 'rsync_user')
+        image_sync_cfg['log_file'] = config.get(section, 'log_file')
         image_sync_cfg['api_nodes'] = tmp_api_nodes.replace(' ', '').split(',')
 
         return image_sync_cfg
@@ -137,6 +141,9 @@ def _duplicate_notifications(glance_api_cfg, image_sync_cfg, conn, exchange):
                                        content_type='application/json')
             exchange.publish(msg_new, routing_key)
 
+        logging.info("%s %s %s" % (msg.payload['event_type'],
+                                   msg.payload['payload']['id'],
+                                   msg.payload['publisher_id']))
         msg.ack()
 
 
@@ -195,6 +202,9 @@ def main(args):
         image_sync_cfg = _read_api_nodes_config()
 
         if glance_api_cfg and image_sync_cfg:
+            logging.basicConfig(filename=image_sync_cfg['log_file'],
+                                format='%(asctime)s %(message)s',
+                                level=logging.INFO)
             conn, exchange = _connect(glance_api_cfg)
         else:
             sys.exit(1)
