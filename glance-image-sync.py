@@ -127,7 +127,7 @@ def _duplicate_notifications(glance_api_cfg, image_sync_cfg, conn, exchange):
             break
 
         # Skip over non-glance notifications.
-        if not msg.payload['event_type'].startswith('image.'):
+        if msg.payload['event_type'] not in ('image.update', 'image.delete'):
             continue
 
         for node in image_sync_cfg['api_nodes']:
@@ -159,6 +159,9 @@ def _sync_images(glance_api_cfg, image_sync_cfg, conn, exchange):
         if msg is None:
             break
 
+        image_filename = "%s/%s" % (glance_api_cfg['datadir'],
+                                    msg.payload['payload']['id'])
+
         # An image create generates a create and update notification, so we
         # just pass over the create notification and use the update one
         # instead.
@@ -167,28 +170,22 @@ def _sync_images(glance_api_cfg, image_sync_cfg, conn, exchange):
         # have the image; we do send deletes to all nodes though since the
         # node which receives the delete request may not have the completed
         # image yet.
-        if msg.payload['event_type'] in ('image.update', 'image.delete'):
-            image_filename = "%s/%s" % (glance_api_cfg['datadir'],
-                                        msg.payload['payload']['id'])
-
-            if (msg.payload['event_type'] == 'image.update' and
-                    msg.payload['publisher_id'] != hostname):
-                print 'Update detected on %s ...' % (image_filename)
-                os.system("rsync -a -e 'ssh -o StrictHostKeyChecking=no' "
-                          "%s@%s:%s %s" % (image_sync_cfg['rsync_user'],
-                                           msg.payload['publisher_id'],
-                                           image_filename, image_filename))
-                msg.ack()
-            elif msg.payload['event_type'] == 'image.delete':
-                print 'Delete detected on %s ...' % (image_filename)
-                # Don't delete file if it's still being copied (we're looking
-                # for the temporary file as it's being copied by rsync here).
-                image_glob = '%s/.*%s*' % (glance_api_cfg['datadir'],
-                                           msg.payload['payload']['id'])
-                if not glob.glob(image_glob):
-                    os.system('rm %s' % (image_filename))
-                    msg.ack()
-            else:
+        if (msg.payload['event_type'] == 'image.update' and
+                msg.payload['publisher_id'] != hostname):
+            print 'Update detected on %s ...' % (image_filename)
+            os.system("rsync -a -e 'ssh -o StrictHostKeyChecking=no' "
+                      "%s@%s:%s %s" % (image_sync_cfg['rsync_user'],
+                                       msg.payload['publisher_id'],
+                                       image_filename, image_filename))
+            msg.ack()
+        elif msg.payload['event_type'] == 'image.delete':
+            print 'Delete detected on %s ...' % (image_filename)
+            # Don't delete file if it's still being copied (we're looking
+            # for the temporary file as it's being copied by rsync here).
+            image_glob = '%s/.*%s*' % (glance_api_cfg['datadir'],
+                                       msg.payload['payload']['id'])
+            if not glob.glob(image_glob):
+                os.system('rm %s' % (image_filename))
                 msg.ack()
         else:
             msg.ack()
