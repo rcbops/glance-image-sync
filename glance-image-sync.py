@@ -218,7 +218,7 @@ def main(args):
     lock = lockfile.FileLock(image_sync_cfg["lock_file"])
 
     if lock.is_locked():
-        exit(1)
+        sys.exit(1)
 
     with lock:
         if cmd == 'duplicate-notifications':
