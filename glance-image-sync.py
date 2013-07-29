@@ -16,6 +16,7 @@
 #
 
 import glob
+import lockfile
 import logging
 import os
 import socket
@@ -33,13 +34,16 @@ def _read_api_nodes_config():
     image_sync_cfg = {}
     section = 'DEFAULT'
     default_log = '/var/log/glance/glance-image-sync.log'
+    default_lock = '/var/run/glance-image-sync'
     config = ConfigParser.RawConfigParser({'rsync_user': 'glance',
-                                           'log_file': default_log})
+                                           'log_file': default_log,
+                                           'lock_file': default_lock})
 
     if config.read(IMAGE_SYNC_CONFIG):
         tmp_api_nodes = config.get(section, 'api_nodes')
         image_sync_cfg['rsync_user'] = config.get(section, 'rsync_user')
         image_sync_cfg['log_file'] = config.get(section, 'log_file')
+        image_sync_cfg['lock_file'] = config.get(section, 'lock_file')
         image_sync_cfg['api_nodes'] = tmp_api_nodes.replace(' ', '').split(',')
 
         return image_sync_cfg
@@ -211,17 +215,23 @@ def main(args):
     else:
         sys.exit(1)
 
-    if cmd == 'duplicate-notifications':
-        _duplicate_notifications(glance_api_cfg, image_sync_cfg, conn,
-                                 exchange)
-    elif cmd == 'sync-images':
-        _sync_images(glance_api_cfg, image_sync_cfg, conn, exchange)
-    elif cmd == 'both':
-        _duplicate_notifications(glance_api_cfg, image_sync_cfg, conn,
-                                 exchange)
-        _sync_images(glance_api_cfg, image_sync_cfg, conn, exchange)
+    lock = lockfile.FileLock(image_sync_cfg["lock_file"])
 
-    conn.close()
+    if lock.is_locked():
+        sys.exit(1)
+
+    with lock:
+        if cmd == 'duplicate-notifications':
+            _duplicate_notifications(glance_api_cfg, image_sync_cfg, conn,
+                                     exchange)
+        elif cmd == 'sync-images':
+            _sync_images(glance_api_cfg, image_sync_cfg, conn, exchange)
+        elif cmd == 'both':
+            _duplicate_notifications(glance_api_cfg, image_sync_cfg, conn,
+                                     exchange)
+            _sync_images(glance_api_cfg, image_sync_cfg, conn, exchange)
+
+        conn.close()
 
 
 if __name__ == '__main__':
