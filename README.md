@@ -12,6 +12,8 @@ Your /etc/glance/glance-image-sync.conf should look like:
     [DEFAULT]
     api_nodes = node1,node2,node3,...
     rsync_user = someone
+    log_file = /var/log/glance/glance-image-sync.log
+    verbose = True
 
 API nodes can be specified in /etc/glance/glance-image-sync.conf using a short name or FQDN; both will work as we check for FQDN and then shorten it. However, the glance kombu notifier uses _socket.gethostname()_ for _publisher_id_, so you will need to ensure that nodes can be accessed by name using short name and FQDN since socket.gethostname() may return short name or FQDN depending on how the system was configured.  Additionally, you can optionally specify the ssh user rsync uses to retrieve images.  If left unspecified, this will default to the _glance_ user.
 
