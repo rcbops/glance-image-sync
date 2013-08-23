@@ -1,0 +1,18 @@
+Source: python-rcb
+Maintainer: Matt Thompson <mattt@defunct.ca>
+Section: python
+Priority: optional
+Standards-Version: 3.9.3
+Build-Depends: debhelper (>= 8),
+  python,
+  python-support (>= 0.90),
+  python-setuptools
+XS-Python-Version: >= 2.6
+
+Package: python-rcb
+Architecture: all
+Depends: ${python:Depends}, ${misc:Depends},
+  python-glance,
+  python-oslo.config
+Description: RCB OpenStack python tools
+ RCB OpenStack python tools for private cloud installations.

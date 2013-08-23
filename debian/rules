@@ -1,0 +1,15 @@
+#!/usr/bin/make -f
+%:
+	dh $@
+
+override_dh_auto_install:
+	python setup.py install --prefix=/usr --install-layout=deb --root=.
+	dh_auto_install
+
+override_dh_auto_clean:
+	dh_auto_clean
+	rm -rf build
+	rm -rf *.egg-info
+
+override_dh_installinit:
+	dh_installinit --name="glance-image-sync" --no-start

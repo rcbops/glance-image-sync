@@ -1,0 +1,15 @@
+description "Nova compute worker"
+author "Soren Hansen <soren@linux2go.dk>"
+
+start on runlevel [2345]
+stop on runlevel [!2345]
+
+#respawn
+
+script
+	test -f /etc/default/glance-image-sync && . /etc/default/glance-image-sync
+
+	test "$ENABLED" != "0" || exit 0
+
+	exec start-stop-daemon --make-pidfile --pidfile /var/run/glance-image-sync.pid --start --chuid glance --startas /usr/bin/glance-image-sync -- --daemon
+end script
