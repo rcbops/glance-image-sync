@@ -365,12 +365,6 @@ def main():
         streamHandler.setFormatter(formatter)
         LOG.addHandler(streamHandler)
 
-        LOG.debug('debug message')
-        LOG.info('info message')
-        LOG.warn('warn message')
-        LOG.error('error message')
-        LOG.critical('critical message')
-
         if glance_api_cfg and image_sync_cfg:
             if cmd['verbose'] is True:
                 reporter(
@@ -391,6 +385,7 @@ def main():
             lock = lockfile.FileLock(image_sync_cfg["lock_file"])
 
             if lock.is_locked():
+                LOG.critical('Lock file was already locked.')
                 raise SystemExit('Lock file was already locked.')
             else:
 
@@ -413,6 +408,7 @@ def main():
 
                     conn.close()
         else:
+            LOG.error('Application Error in Glance / Image Sync Config.')
             raise SystemExit(
                 'Application was not able to parse the glance-image-sync'
                 ' config, the glance API config or both.'
