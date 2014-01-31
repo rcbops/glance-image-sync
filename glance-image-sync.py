@@ -15,19 +15,25 @@
 # limitations under the License.
 #
 
+import argparse
+import ConfigParser
 import glob
-import lockfile
 import logging
 import os
 import socket
 import sys
-import ConfigParser
-from kombu import BrokerConnection
-from kombu import Exchange
-from kombu import Queue
+
+import lockfile
+
+import kombu
+
 
 IMAGE_SYNC_CONFIG = '/etc/glance/glance-image-sync.conf'
 GLANCE_API_CONFIG = '/etc/glance/glance-api.conf'
+RSYNC_COMMAND = (
+    "rsync -a -e 'ssh -o StrictHostKeyChecking=no'"
+    " %(user)s@%(host)s:%(file)s %(file)s"
+)
 
 
 def _read_api_nodes_config():
@@ -81,48 +87,71 @@ def _read_glance_api_config():
 
 
 def _connect(glance_api_cfg):
-    # We use BrokerConnection rather than Connection as RHEL 6 has an ancient
-    # version of kombu library.
-    conn = BrokerConnection(hostname=glance_api_cfg['host'],
-                            port=glance_api_cfg['port'],
-                            userid=glance_api_cfg['userid'],
-                            password=glance_api_cfg['password'],
-                            virtual_host=glance_api_cfg['virtual_host'])
-    exchange = Exchange(glance_api_cfg['exchange'],
-                        type='topic',
-                        durable=False,
-                        channel=conn.channel())
+    """Create the connection the AMQP.
+
+    We use BrokerConnection rather than Connection as RHEL 6 has an ancient
+    version of kombu library.
+    """
+
+    conn = kombu.BrokerConnection(
+        hostname=glance_api_cfg['host'],
+        port=glance_api_cfg['port'],
+        userid=glance_api_cfg['userid'],
+        password=glance_api_cfg['password'],
+        virtual_host=glance_api_cfg['virtual_host']
+    )
+    exchange = kombu.Exchange(
+        glance_api_cfg['exchange'],
+        type='topic',
+        durable=False,
+        channel=conn.channel()
+    )
 
     return conn, exchange
 
 
-def _declare_queue(glance_api_cfg, routing_key, conn, exchange):
-    queue = Queue(name=routing_key,
-                  routing_key=routing_key,
-                  exchange=exchange,
-                  channel=conn.channel(),
-                  durable=False)
+def _declare_queue(routing_key, conn, exchange):
+    """Declare the queue that we are working with."""
+
+    queue = kombu.Queue(
+        name=routing_key,
+        routing_key=routing_key,
+        exchange=exchange,
+        channel=conn.channel(),
+        durable=False
+    )
     queue.declare()
 
     return queue
 
 
 def _shorten_hostname(node):
-    # If hostname is an FQDN, split it up and return the short name. Some
-    # systems may return FQDN on socket.gethostname(), so we choose one
-    # and run w/ that.
+    """If hostname is an FQDN, split it up and return the short name.
+
+    Some systems may return FQDN on socket.gethostname(), so we choose one
+    and run w/ that.
+    """
+
     if '.' in node:
         return node.split('.')[0]
     else:
         return node
 
 
+def _message_publish(message, exchange, routing_key):
+    """Publish Messages back to AMQP."""
+
+    msg_new = exchange.Message(
+        message, content_type='application/json'
+    )
+    exchange.publish(msg_new, routing_key)
+
+
 def _duplicate_notifications(glance_api_cfg, image_sync_cfg, conn, exchange):
     routing_key = '%s.info' % glance_api_cfg['topic']
-    notification_queue = _declare_queue(glance_api_cfg,
-                                        routing_key,
-                                        conn,
-                                        exchange)
+    notification_queue = _declare_queue(
+        routing_key, conn, exchange
+    )
 
     while True:
         msg = notification_queue.get()
@@ -136,35 +165,36 @@ def _duplicate_notifications(glance_api_cfg, image_sync_cfg, conn, exchange):
 
         for node in image_sync_cfg['api_nodes']:
             routing_key = 'glance_image_sync.%s.info' % _shorten_hostname(node)
-            node_queue = _declare_queue(glance_api_cfg,
-                                        routing_key,
-                                        conn,
-                                        exchange)
+            _message_publish(msg.body, exchange, routing_key)
 
-            msg_new = exchange.Message(msg.body,
-                                       content_type='application/json')
-            exchange.publish(msg_new, routing_key)
+        reporter(
+            "%s %s %s" % (
+                msg.payload['event_type'],
+                msg.payload['payload']['id'],
+                msg.payload['publisher_id']
+            )
+        )
 
-        logging.info("%s %s %s" % (msg.payload['event_type'],
-                                   msg.payload['payload']['id'],
-                                   msg.payload['publisher_id']))
         msg.ack()
 
 
 def _sync_images(glance_api_cfg, image_sync_cfg, conn, exchange):
-    hostname = socket.gethostname()
+    """Sync Images and ACK for the message as found in RabbitMQ."""
 
+    hostname = socket.gethostname()
     routing_key = 'glance_image_sync.%s.info' % _shorten_hostname(hostname)
-    queue = _declare_queue(glance_api_cfg, routing_key, conn, exchange)
+    sync_queue = _declare_queue(
+        routing_key, conn, exchange
+    )
 
     while True:
-        msg = queue.get()
-
+        msg = sync_queue.get()
         if msg is None:
             break
 
-        image_filename = "%s/%s" % (glance_api_cfg['datadir'],
-                                    msg.payload['payload']['id'])
+        image_filename = "%s/%s" % (
+            glance_api_cfg['datadir'], msg.payload['payload']['id']
+        )
 
         # An image create generates a create and update notification, so we
         # just pass over the create notification and use the update one
@@ -174,34 +204,83 @@ def _sync_images(glance_api_cfg, image_sync_cfg, conn, exchange):
         # have the image; we do send deletes to all nodes though since the
         # node which receives the delete request may not have the completed
         # image yet.
-        if (msg.payload['event_type'] == 'image.update' and
-                msg.payload['publisher_id'] != hostname):
-            print 'Update detected on %s ...' % (image_filename)
-            os.system("rsync -a -e 'ssh -o StrictHostKeyChecking=no' "
-                      "%s@%s:%s %s" % (image_sync_cfg['rsync_user'],
-                                       msg.payload['publisher_id'],
-                                       image_filename, image_filename))
-            msg.ack()
+
+        system_process = [
+            msg.payload['event_type'] == 'image.update',
+            msg.payload['publisher_id'] != hostname
+        ]
+
+        if all(system_process):
+            reporter('Update detected on "%s"' % image_filename)
+            process_args = {
+                'user': image_sync_cfg['rsync_user'],
+                'host': msg.payload['publisher_id'],
+                'file': image_filename
+            }
+            os.system(RSYNC_COMMAND % process_args)
+            _message_publish(msg.body, exchange, 'notifications.info')
+
         elif msg.payload['event_type'] == 'image.delete':
-            print 'Delete detected on %s ...' % (image_filename)
+            reporter('Delete detected on %s ...' % image_filename)
             # Don't delete file if it's still being copied (we're looking
             # for the temporary file as it's being copied by rsync here).
-            image_glob = '%s/.*%s*' % (glance_api_cfg['datadir'],
-                                       msg.payload['payload']['id'])
+            image_glob = '%s/.*%s*' % (
+                glance_api_cfg['datadir'], msg.payload['payload']['id']
+            )
             if not glob.glob(image_glob):
-                os.system('rm %s' % (image_filename))
-                msg.ack()
+                os.remove(image_filename)
+                _message_publish(msg.body, exchange, 'notifications.info')
         else:
-            msg.ack()
+            _message_publish(msg.body, exchange, 'notifications.info')
 
 
-def main(args):
-    if len(args) == 2:
-        cmd = args[1]
+def reporter(message):
+    """Report Any Messages that need reporting."""
+
+    print(message)
+    logging.info(message)
+
+
+def _arg_parser():
+    """Setup argument Parsing."""
+
+    parser = argparse.ArgumentParser(
+        usage='%(prog)s',
+        description='Rackspace Openstack, Glance Image Sync Application',
+        epilog='Glance Image Sync Licensed "Apache 2.0"')
+
+    subpar = parser.add_subparsers()
+
+    dup = subpar.add_parser(
+        'duplicate-notifications',
+        help='process duplicate notifications.'
+    )
+    dup.set_defaults(method='duplicate_notifications')
+
+    syn = subpar.add_parser(
+        'sync-images',
+        help='Sync Images between Controller Nodes.'
+    )
+    syn.set_defaults(method='sync_images')
+
+    bth = subpar.add_parser(
+        'both',
+        help='Perform all operations.'
+    )
+    bth.set_defaults(method='both')
+
+    return parser
+
+
+def main():
+    """Run Main Application."""
+
+    parser = _arg_parser()
+    if len(sys.argv) < 2:
+        raise SystemExit(parser.print_help())
     else:
-        sys.exit(1)
+        cmd = vars(parser.parse_args())
 
-    if cmd in ('duplicate-notifications', 'sync-images', 'both'):
         glance_api_cfg = _read_glance_api_config()
         image_sync_cfg = _read_api_nodes_config()
 
@@ -210,29 +289,36 @@ def main(args):
                                 format='%(asctime)s %(message)s',
                                 level=logging.INFO)
             conn, exchange = _connect(glance_api_cfg)
+
+            lock = lockfile.FileLock(image_sync_cfg["lock_file"])
+
+            if lock.is_locked():
+                raise SystemExit('Lock file was already locked.')
+            else:
+
+                with lock:
+                    if cmd['method'] == 'duplicate-notifications':
+                        _duplicate_notifications(
+                            glance_api_cfg, image_sync_cfg, conn, exchange
+                        )
+                    elif cmd['method'] == 'sync-images':
+                        _sync_images(
+                            glance_api_cfg, image_sync_cfg, conn, exchange
+                        )
+                    elif cmd['method'] == 'both':
+                        _duplicate_notifications(
+                            glance_api_cfg, image_sync_cfg, conn, exchange
+                        )
+                        _sync_images(
+                            glance_api_cfg, image_sync_cfg, conn, exchange
+                        )
+
+                    conn.close()
         else:
-            sys.exit(1)
-    else:
-        sys.exit(1)
-
-    lock = lockfile.FileLock(image_sync_cfg["lock_file"])
-
-    if lock.is_locked():
-        sys.exit(1)
-
-    with lock:
-        if cmd == 'duplicate-notifications':
-            _duplicate_notifications(glance_api_cfg, image_sync_cfg, conn,
-                                     exchange)
-        elif cmd == 'sync-images':
-            _sync_images(glance_api_cfg, image_sync_cfg, conn, exchange)
-        elif cmd == 'both':
-            _duplicate_notifications(glance_api_cfg, image_sync_cfg, conn,
-                                     exchange)
-            _sync_images(glance_api_cfg, image_sync_cfg, conn, exchange)
-
-        conn.close()
-
+            raise SystemExit(
+                'Application was not able to parse the glance-image-sync'
+                ' config, the glance API config or both.'
+            )
 
 if __name__ == '__main__':
-    main(sys.argv)
+    main()
