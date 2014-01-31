@@ -176,7 +176,7 @@ def _duplicate_notifications(glance_api_cfg, image_sync_cfg, conn, exchange):
                     exchange,
                     'glance_image_sync.%s.info' % _shorten_hostname(node)
                 )
-
+            msg.ack()
             reporter(
                 "%s %s %s" % (
                     msg.payload['event_type'],
@@ -184,8 +184,6 @@ def _duplicate_notifications(glance_api_cfg, image_sync_cfg, conn, exchange):
                     msg.payload['publisher_id']
                 )
             )
-
-            msg.ack()
 
 
 def _sync_images(glance_api_cfg, image_sync_cfg, conn, exchange):
@@ -201,7 +199,6 @@ def _sync_images(glance_api_cfg, image_sync_cfg, conn, exchange):
         msg = sync_queue.get()
         if msg is None:
             break
-
         image_filename = os.path.join(
             os.path.realpath(glance_api_cfg['datadir']),
             msg.payload['payload']['id']
@@ -216,43 +213,46 @@ def _sync_images(glance_api_cfg, image_sync_cfg, conn, exchange):
         # node which receives the delete request may not have the completed
         # image yet.
 
-        try:
-            system_process = [
-                msg.payload['event_type'] == 'image.update',
-                msg.payload['publisher_id'] != hostname
-            ]
+        system_process = [
+            msg.payload['event_type'] == 'image.update',
+            msg.payload['publisher_id'] != hostname
+        ]
 
-            if all(system_process):
-                reporter('Update detected on "%s"' % image_filename)
-                process_args = {
-                    'user': image_sync_cfg['rsync_user'],
-                    'host': msg.payload['publisher_id'],
-                    'file': image_filename
-                }
-                rsync = RSYNC_COMMAND % process_args
-                try:
-                    subprocess.check_call(rsync.split())
-                except subprocess.CalledProcessError as exp:
-                    reporter(exp, log_only=True)
-                _message_publish(msg.body, exchange, 'notifications.info')
-
-            elif msg.payload['event_type'] == 'image.delete':
-                reporter('Delete detected on %s ...' % image_filename)
-                # Don't delete file if it's still being copied (we're looking
-                # for the temporary file as it's being copied by rsync here).
-                image_glob = '%s/.*%s*' % (
-                    glance_api_cfg['datadir'], msg.payload['payload']['id']
+        if all(system_process):
+            reporter('Update detected on "%s"' % image_filename)
+            process_args = {
+                'user': image_sync_cfg['rsync_user'],
+                'host': msg.payload['publisher_id'],
+                'file': image_filename
+            }
+            rsync = RSYNC_COMMAND % process_args
+            try:
+                subprocess.check_call(rsync.split(), stdout=subprocess.PIPE)
+            except subprocess.CalledProcessError as exp:
+                reporter(
+                    'ERROR: requeuing the job, Message: %s' % exp,
+                    log_only=True
                 )
-                if not glob.glob(image_glob):
-                    try:
-                        os.remove(image_filename)
-                    except OSError:
-                        pass
-                    _message_publish(msg.body, exchange, 'notifications.info')
             else:
                 _message_publish(msg.body, exchange, 'notifications.info')
-        finally:
-            msg.ack()
+                msg.ack()
+
+        elif msg.payload['event_type'] == 'image.delete':
+            reporter('Delete detected on %s ...' % image_filename)
+            # Don't delete file if it's still being copied (we're looking
+            # for the temporary file as it's being copied by rsync here).
+            image_glob = '%s/.*%s*' % (
+                glance_api_cfg['datadir'], msg.payload['payload']['id']
+            )
+            if not glob.glob(image_glob):
+                try:
+                    os.remove(image_filename)
+                except OSError:
+                    _message_publish(msg.body, exchange, 'notifications.info')
+                    msg.ack()
+                else:
+                    _message_publish(msg.body, exchange, 'notifications.info')
+                    msg.ack()
 
 
 def reporter(message, log_only=False):
