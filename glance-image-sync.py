@@ -18,7 +18,9 @@
 import argparse
 import ConfigParser
 import glob
+import json
 import logging
+import logging.handlers
 import os
 import socket
 import subprocess
@@ -29,6 +31,8 @@ import lockfile
 import kombu
 
 
+LOG = logging.getLogger('glance-image-sync')
+HOSTNAME = socket.gethostname()
 IMAGE_SYNC_CONFIG = '/etc/glance/glance-image-sync.conf'
 GLANCE_API_CONFIG = '/etc/glance/glance-api.conf'
 RSYNC_COMMAND = (
@@ -38,6 +42,8 @@ RSYNC_COMMAND = (
 
 
 def _read_api_nodes_config():
+    """Read the glance image sync config file."""
+
     image_sync_cfg = {}
     section = 'DEFAULT'
     default_log = '/var/log/glance/glance-image-sync.log'
@@ -59,6 +65,8 @@ def _read_api_nodes_config():
 
 
 def _read_glance_api_config():
+    """Read the glance api config file."""
+
     glance_api_cfg = {}
     section = 'DEFAULT'
     config = ConfigParser.RawConfigParser()
@@ -139,16 +147,24 @@ def _shorten_hostname(node):
         return node
 
 
-def _message_publish(message, exchange, routing_key):
-    """Publish Messages back to AMQP."""
+def _message_publish(message, exchange, routing_key, no_ack=False):
+    """Publish Messages back to AMQP.
 
-    msg_new = exchange.Message(
-        message, content_type='application/json'
-    )
-    exchange.publish(msg_new, routing_key)
+    Place new message into a new queue and then ack the message.
+    """
+
+    try:
+        msg_new = exchange.Message(
+            message.body, content_type='application/json'
+        )
+        exchange.publish(msg_new, routing_key)
+    finally:
+        if no_ack is False:
+            message.ack()
 
 
-def _duplicate_notifications(glance_api_cfg, image_sync_cfg, conn, exchange):
+def _duplicate_notifications(glance_api_cfg, image_sync_cfg, conn, exchange,
+                             cmd):
     """Check for duplicate messages.
 
     Act on messages that we require to sync images and place messages that
@@ -166,15 +182,22 @@ def _duplicate_notifications(glance_api_cfg, image_sync_cfg, conn, exchange):
         if msg is None:
             break
 
+        if cmd['verbose'] is True:
+            reporter(
+                '_duplicate_notifications payload: %s'
+                % json.dumps(msg.payload, indent=2),
+                log_lvl='DEBUG'
+            )
+
         if msg.payload['event_type'] not in ('image.update', 'image.delete'):
-            _message_publish(msg.body, exchange, 'notifications.info')
-            msg.ack()
+            _message_publish(msg, exchange, 'notifications.info')
         else:
             for node in image_sync_cfg['api_nodes']:
                 _message_publish(
-                    msg.body,
+                    msg,
                     exchange,
-                    'glance_image_sync.%s.info' % _shorten_hostname(node)
+                    'glance_image_sync.%s.info' % _shorten_hostname(node),
+                    no_ack=True
                 )
             msg.ack()
             reporter(
@@ -186,11 +209,10 @@ def _duplicate_notifications(glance_api_cfg, image_sync_cfg, conn, exchange):
             )
 
 
-def _sync_images(glance_api_cfg, image_sync_cfg, conn, exchange):
+def _sync_images(glance_api_cfg, image_sync_cfg, conn, exchange, cmd):
     """Sync Images and ACK for the message as found in RabbitMQ."""
 
-    hostname = socket.gethostname()
-    routing_key = 'glance_image_sync.%s.info' % _shorten_hostname(hostname)
+    routing_key = 'glance_image_sync.%s.info' % _shorten_hostname(HOSTNAME)
     sync_queue = _declare_queue(
         routing_key, conn, exchange
     )
@@ -199,6 +221,13 @@ def _sync_images(glance_api_cfg, image_sync_cfg, conn, exchange):
         msg = sync_queue.get()
         if msg is None:
             break
+
+        if cmd['verbose'] is True:
+            reporter(
+                '_sync_images payload: %s' % json.dumps(msg.payload, indent=2),
+                log_lvl='DEBUG'
+            )
+
         image_filename = os.path.join(
             os.path.realpath(glance_api_cfg['datadir']),
             msg.payload['payload']['id']
@@ -215,7 +244,7 @@ def _sync_images(glance_api_cfg, image_sync_cfg, conn, exchange):
 
         system_process = [
             msg.payload['event_type'] == 'image.update',
-            msg.payload['publisher_id'] != hostname
+            msg.payload['publisher_id'] != HOSTNAME
         ]
 
         if all(system_process):
@@ -225,42 +254,43 @@ def _sync_images(glance_api_cfg, image_sync_cfg, conn, exchange):
                 'host': msg.payload['publisher_id'],
                 'file': image_filename
             }
-            rsync = RSYNC_COMMAND % process_args
             try:
-                subprocess.check_call(rsync.split(), stdout=subprocess.PIPE)
+                rsync = RSYNC_COMMAND % process_args
+                subprocess.check_call(
+                    rsync, shell=True, stdout=subprocess.PIPE
+                )
             except subprocess.CalledProcessError as exp:
                 reporter(
-                    'ERROR: requeuing the job, Message: %s' % exp,
-                    log_only=True
+                    'ERROR: requeuing the job, Message: %s' % exp
                 )
             else:
-                _message_publish(msg.body, exchange, 'notifications.info')
-                msg.ack()
+                _message_publish(msg, exchange, 'notifications.info')
 
         elif msg.payload['event_type'] == 'image.delete':
-            reporter('Delete detected on %s ...' % image_filename)
-            # Don't delete file if it's still being copied (we're looking
+            # Don't delete a file if it's still being copied (we're looking
             # for the temporary file as it's being copied by rsync here).
             image_glob = '%s/.*%s*' % (
                 glance_api_cfg['datadir'], msg.payload['payload']['id']
             )
             if not glob.glob(image_glob):
                 try:
+                    reporter('Delete detected on %s ...' % image_filename)
                     os.remove(image_filename)
                 except OSError:
-                    _message_publish(msg.body, exchange, 'notifications.info')
-                    msg.ack()
-                else:
-                    _message_publish(msg.body, exchange, 'notifications.info')
-                    msg.ack()
+                    pass
+                finally:
+                    _message_publish(msg, exchange, 'notifications.info')
+        else:
+            _message_publish(msg, exchange, 'notifications.info')
 
 
-def reporter(message, log_only=False):
+def reporter(message, log_lvl='INFO'):
     """Report Any Messages that need reporting."""
 
-    logging.info(message)
-    if log_only is False:
-        print(message)
+    if log_lvl == 'DEBUG':
+        LOG.debug(message)
+    else:
+        LOG.info(message)
 
 
 def _arg_parser():
@@ -271,8 +301,15 @@ def _arg_parser():
         description='Rackspace Openstack, Glance Image Sync Application',
         epilog='Glance Image Sync Licensed "Apache 2.0"')
 
-    subpar = parser.add_subparsers()
+    parser.add_argument(
+        '-v',
+        '--verbose',
+        help='Make the script verbose',
+        action='store_true',
+        default=False
+    )
 
+    subpar = parser.add_subparsers()
     dup = subpar.add_parser(
         'duplicate-notifications',
         help='process duplicate notifications.'
@@ -306,10 +343,49 @@ def main():
         glance_api_cfg = _read_glance_api_config()
         image_sync_cfg = _read_api_nodes_config()
 
+        formatter = logging.Formatter(
+            "%(asctime)s - %(name)s:%(levelname)s => %(message)s"
+        )
+
+        LOG.setLevel(logging.DEBUG)
+        fileHandler = logging.handlers.RotatingFileHandler(
+            filename=image_sync_cfg['log_file'],
+            maxBytes=51200,
+            backupCount=5
+        )
+        fileHandler.setLevel(logging.DEBUG)
+        fileHandler.setFormatter(formatter)
+        LOG.addHandler(fileHandler)
+
+        streamHandler = logging.StreamHandler()
+        if cmd['verbose'] is True:
+            streamHandler.setLevel(logging.DEBUG)
+        else:
+            streamHandler.setLevel(logging.ERROR)
+        streamHandler.setFormatter(formatter)
+        LOG.addHandler(streamHandler)
+
+        LOG.debug('debug message')
+        LOG.info('info message')
+        LOG.warn('warn message')
+        LOG.error('error message')
+        LOG.critical('critical message')
+
         if glance_api_cfg and image_sync_cfg:
-            logging.basicConfig(filename=image_sync_cfg['log_file'],
-                                format='%(asctime)s %(message)s',
-                                level=logging.INFO)
+            if cmd['verbose'] is True:
+                reporter(
+                    'Glance API Config: %s'
+                    % json.dumps(glance_api_cfg, indent=2),
+                    log_lvl='DEBUG'
+                )
+
+            if cmd['verbose'] is True:
+                reporter(
+                    'Glance Image Sync Config: %s'
+                    % json.dumps(image_sync_cfg, indent=2),
+                    log_lvl='DEBUG'
+                )
+
             conn, exchange = _connect(glance_api_cfg)
 
             lock = lockfile.FileLock(image_sync_cfg["lock_file"])
@@ -321,18 +397,18 @@ def main():
                 with lock:
                     if cmd['method'] == 'duplicate-notifications':
                         _duplicate_notifications(
-                            glance_api_cfg, image_sync_cfg, conn, exchange
+                            glance_api_cfg, image_sync_cfg, conn, exchange, cmd
                         )
                     elif cmd['method'] == 'sync-images':
                         _sync_images(
-                            glance_api_cfg, image_sync_cfg, conn, exchange
+                            glance_api_cfg, image_sync_cfg, conn, exchange, cmd
                         )
                     elif cmd['method'] == 'both':
                         _duplicate_notifications(
-                            glance_api_cfg, image_sync_cfg, conn, exchange
+                            glance_api_cfg, image_sync_cfg, conn, exchange, cmd
                         )
                         _sync_images(
-                            glance_api_cfg, image_sync_cfg, conn, exchange
+                            glance_api_cfg, image_sync_cfg, conn, exchange, cmd
                         )
 
                     conn.close()
@@ -341,6 +417,9 @@ def main():
                 'Application was not able to parse the glance-image-sync'
                 ' config, the glance API config or both.'
             )
+
+        if cmd['verbose'] is True:
+            reporter('ARGS: %s' % json.dumps(cmd, indent=2))
 
 if __name__ == '__main__':
     main()
