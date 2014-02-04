@@ -41,6 +41,18 @@ RSYNC_COMMAND = (
 )
 
 
+class FatalErrorInSyncProcess(Exception):
+    def __init__(self, cmd, msg, rep):
+        self.msg = (
+            'Fatal Error While attempting to sync. ORIGINAL MESSAGE: [ %s ]'
+            ' COMMAND: "%s"' % (cmd, msg)
+        )
+        rep(message=self.msg, log_lvl='ERROR')
+
+    def __str__(self):
+        return self.msg
+
+
 def _read_api_nodes_config():
     """Read the glance image sync config file."""
 
@@ -256,10 +268,35 @@ def _sync_images(glance_api_cfg, image_sync_cfg, conn, exchange, cmd):
             }
             try:
                 rsync = RSYNC_COMMAND % process_args
-                subprocess.check_call(
-                    rsync, shell=True, stdout=subprocess.PIPE
+                return_code = subprocess.call(
+                    rsync, shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
                 )
-            except subprocess.CalledProcessError as exp:
+                if return_code == 23:
+                    _message_publish(msg, exchange, 'notifications.info')
+                    reporter(
+                        'The remote file "%s" on "%s" was not found.'
+                        ' Message: [ %s ]. This Sync was Aborted due to'
+                        ' error code "%d" which was returned from RSYNC.'
+                        % (image_filename,
+                           msg.payload['publisher_id'],
+                           msg.payload,
+                           return_code)
+                    )
+                elif return_code > 0:
+                    message = (
+                        'Command "%s" returned non-zero exit status "%d"'
+                        % (rsync, return_code)
+                    )
+                    raise FatalErrorInSyncProcess(
+                        cmd=rsync, msg=message, rep=reporter
+                    )
+                else:
+                    raise FatalErrorInSyncProcess(
+                        cmd=rsync, msg=msg.payload, rep=reporter
+                    )
+            except FatalErrorInSyncProcess as exp:
                 reporter(
                     'ERROR: requeuing the job, Message: %s' % exp
                 )
@@ -289,6 +326,8 @@ def reporter(message, log_lvl='INFO'):
 
     if log_lvl == 'DEBUG':
         LOG.debug(message)
+    elif log_lvl == 'ERROR':
+        LOG.error(message)
     else:
         LOG.info(message)
 
