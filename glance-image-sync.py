@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Copyright 2012, Rackspace US, Inc.
+# Copyright 2014, Rackspace US, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -39,6 +39,18 @@ RSYNC_COMMAND = (
     "rsync -az -e 'ssh -o StrictHostKeyChecking=no'"
     " %(user)s@%(host)s:%(file)s %(file)s"
 )
+
+
+class FatalErrorInSyncProcess(Exception):
+    def __init__(self, cmd, msg, rep):
+        self.msg = (
+            'Fatal Error While attempting to sync. ORIGINAL MESSAGE: [ %s ]'
+            ' COMMAND: "%s"' % (msg, cmd)
+        )
+        rep(message=self.msg, log_lvl='ERROR')
+
+    def __str__(self):
+        return self.msg
 
 
 def _read_api_nodes_config():
@@ -256,13 +268,39 @@ def _sync_images(glance_api_cfg, image_sync_cfg, conn, exchange, cmd):
             }
             try:
                 rsync = RSYNC_COMMAND % process_args
-                subprocess.check_call(
-                    rsync, shell=True, stdout=subprocess.PIPE
+                return_code = subprocess.call(
+                    rsync, shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
                 )
-            except subprocess.CalledProcessError as exp:
-                reporter(
-                    'ERROR: requeuing the job, Message: %s' % exp
-                )
+                if return_code == 23:
+                    _message_publish(msg, exchange, 'notifications.info')
+                    reporter(
+                        'The remote file "%s" on "%s" was not found.'
+                        ' Message: [ %s ]. This Sync was Aborted due to'
+                        ' error code "%d" which was returned from RSYNC.'
+                        % (image_filename,
+                           msg.payload['publisher_id'],
+                           msg.payload,
+                           return_code)
+                    )
+                elif return_code != 0:
+                    message = (
+                        'Command "%s" returned non-zero exit status "%d"'
+                        % (rsync, return_code)
+                    )
+                    raise FatalErrorInSyncProcess(
+                        cmd=rsync, msg=message, rep=reporter
+                    )
+            except FatalErrorInSyncProcess:
+                if 'message_id' in msg.payload:
+                    reporter(
+                        'ERROR: re-queuing job ID: "%s"'
+                        % msg.payload['message_id'],
+                        log_lvl='ERROR'
+                    )
+                else:
+                    reporter('ERROR: Job is being re-queued')
             else:
                 _message_publish(msg, exchange, 'notifications.info')
 
@@ -289,6 +327,8 @@ def reporter(message, log_lvl='INFO'):
 
     if log_lvl == 'DEBUG':
         LOG.debug(message)
+    elif log_lvl == 'ERROR':
+        LOG.error(message)
     else:
         LOG.info(message)
 
