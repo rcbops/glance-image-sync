@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Copyright 2012, Rackspace US, Inc.
+# Copyright 2014, Rackspace US, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -45,7 +45,7 @@ class FatalErrorInSyncProcess(Exception):
     def __init__(self, cmd, msg, rep):
         self.msg = (
             'Fatal Error While attempting to sync. ORIGINAL MESSAGE: [ %s ]'
-            ' COMMAND: "%s"' % (cmd, msg)
+            ' COMMAND: "%s"' % (msg, cmd)
         )
         rep(message=self.msg, log_lvl='ERROR')
 
@@ -284,7 +284,7 @@ def _sync_images(glance_api_cfg, image_sync_cfg, conn, exchange, cmd):
                            msg.payload,
                            return_code)
                     )
-                elif return_code > 0:
+                elif return_code != 0:
                     message = (
                         'Command "%s" returned non-zero exit status "%d"'
                         % (rsync, return_code)
@@ -292,14 +292,15 @@ def _sync_images(glance_api_cfg, image_sync_cfg, conn, exchange, cmd):
                     raise FatalErrorInSyncProcess(
                         cmd=rsync, msg=message, rep=reporter
                     )
-                else:
-                    raise FatalErrorInSyncProcess(
-                        cmd=rsync, msg=msg.payload, rep=reporter
+            except FatalErrorInSyncProcess:
+                if 'message_id' in msg.payload:
+                    reporter(
+                        'ERROR: re-queuing job ID: "%s"'
+                        % msg.payload['message_id'],
+                        log_lvl='ERROR'
                     )
-            except FatalErrorInSyncProcess as exp:
-                reporter(
-                    'ERROR: requeuing the job, Message: %s' % exp
-                )
+                else:
+                    reporter('ERROR: Job is being re-queued')
             else:
                 _message_publish(msg, exchange, 'notifications.info')
 
